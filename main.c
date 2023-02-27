@@ -5,6 +5,8 @@
 #include "mmu.h"
 #include "proc.h"
 #include "x86.h"
+#include "time.h"
+#include "stdio.h"
 
 static void startothers(void);
 static void mpmain(void)  __attribute__((noreturn));

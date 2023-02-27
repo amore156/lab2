@@ -6,6 +6,8 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "time.h"
+#include "stdio.h"
 
 struct {
   struct spinlock lock;
@@ -14,6 +16,7 @@ struct {
 
 static struct proc *initproc;
 
+int baseline_priority = 15;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
@@ -88,6 +91,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = p->baseline_priority;
 
   release(&ptable.lock);
 
@@ -183,6 +187,9 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *curproc = myproc();
+ 
+  // Modification (Q3)  
+  curproc->start_t = clock();
 
   // Allocate process.
   if((np = allocproc()) == 0){
@@ -196,9 +203,13 @@ fork(void)
     np->state = UNUSED;
     return -1;
   }
+
+  np->priority = curproc->priority;// Modification (Q2)
+
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -230,6 +241,9 @@ exit(void)
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
+
+  cprintf("Wait time: %f\n", curproc->wait_time ); // Modification (Q3)
+  cprintf("Turnaround time: %f\n", curproc->turnaround_time ); // Modification (Q3)
 
   if(curproc == initproc)
     panic("init exiting");
@@ -311,6 +325,17 @@ wait(void)
   }
 }
 
+int setpriority(int i) {
+   struct proc *p = myproc();
+
+   if (p->priority < 0 || p->priority > 31) return -1;
+   else p->priority = p->baseline_priority;
+	
+   return 0;      
+
+}
+
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -332,16 +357,30 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    struct proc *highest_priority;
+    highest_priority = ptable.proc;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){      
+
       if(p->state != RUNNABLE)
         continue;
+
+      // Modification (Q1)
+      if(p->priority < highest_priority->priority) highest_priority = p;
+
+    }
+    p = highest_priority;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
       c->proc = p;
+      p->priority = p->baseline_priority;      
+ 
       switchuvm(p);
+      p->run_t = clock(); //  Modification (Q3)
+
       p->state = RUNNING;
+      p->priority += -1; // Modification (Q1)
 
       swtch(&(c->scheduler), p->context);
       switchkvm();
@@ -349,7 +388,12 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-    }
+     
+      p->end_t = clock(); // Modification (Q3)
+      p->turnaround_time += p->end_t - p->start_t;
+      p->wait_time += p->run_t - p->start_t;
+
+    
     release(&ptable.lock);
 
   }
