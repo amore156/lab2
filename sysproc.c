@@ -91,8 +91,11 @@ sys_uptime(void)
   return xticks;
 }
 
+// Modification
+
 int sys_setpriority(void)
 {
-  int priority = 15;
+  int priority;
+  if(argint(0, &priority) < 0) return -1;
   return setpriority(priority);
 }

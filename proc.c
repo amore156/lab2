@@ -16,7 +16,6 @@ struct {
 
 static struct proc *initproc;
 
-int baseline_priority = 15;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
@@ -91,7 +90,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-  p->priority = p->baseline_priority;
+  p->priority = 10;
 
   release(&ptable.lock);
 
@@ -115,6 +114,10 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
+
+  // Modification
+  p->priority = 31;
+  p->start_t = ticks;
 
   return p;
 }
@@ -187,9 +190,6 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *curproc = myproc();
- 
-  // Modification (Q3)  
-  curproc->start_t = clock();
 
   // Allocate process.
   if((np = allocproc()) == 0){
@@ -203,8 +203,6 @@ fork(void)
     np->state = UNUSED;
     return -1;
   }
-
-  np->priority = curproc->priority;// Modification (Q2)
 
   np->sz = curproc->sz;
   np->parent = curproc;
@@ -225,6 +223,7 @@ fork(void)
 
   acquire(&ptable.lock);
 
+  np->priority = np->parent->priority; // Modification (Q2)
   np->state = RUNNABLE;
 
   release(&ptable.lock);
@@ -242,9 +241,6 @@ exit(void)
   struct proc *p;
   int fd;
 
-  cprintf("Wait time: %f\n", curproc->wait_time ); // Modification (Q3)
-  cprintf("Turnaround time: %f\n", curproc->turnaround_time ); // Modification (Q3)
-
   if(curproc == initproc)
     panic("init exiting");
 
@@ -261,6 +257,15 @@ exit(void)
   end_op();
   curproc->cwd = 0;
 
+  // Modification (Q3)
+  curproc->end_t = ticks;
+  int turnaround = curproc->end_t - curproc->start_t;
+  int burst = (turnaround - curproc->burst_t);
+  int wait = turnaround - burst;
+  cprintf("\n Turnaround time = %d\n", turnaround);
+  cprintf(" Wait time = %d\n", wait);
+  cprintf("\n");
+
   acquire(&ptable.lock);
 
   // Parent might be sleeping in wait().
@@ -270,8 +275,7 @@ exit(void)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->parent == curproc){
       p->parent = initproc;
-      if(p->state == ZOMBIE)
-        wakeup1(initproc);
+      if(p->state == ZOMBIE) wakeup1(initproc);
     }
   }
 
@@ -279,6 +283,32 @@ exit(void)
   curproc->state = ZOMBIE;
   sched();
   panic("zombie exit");
+}
+
+// Modification (Failed to implement)
+void
+exitstatus(int status)
+{
+  struct proc *curproc = myproc();
+  int fd;
+
+  if(curproc == initproc) panic("Stoping init");
+
+  for (fd = 0; fd < NOFILE; fd++){
+    if (curproc->ofile[fd]){
+      fileclose(curproc->ofile[fd]);
+      curproc->ofile[fd] = 0;
+    }
+  } 
+
+  begin_op();
+  iput(curproc->cwd);
+  end_op();
+  curproc->cwd = 0;
+  curproc-> end_t = ticks;
+  int turnaround = curproc->end_t - curproc->start_t;
+  cprintf("\n Turnaround = %d\n", turnaround);
+
 }
 
 // Wait for a child process to exit and return its pid.
@@ -325,16 +355,11 @@ wait(void)
   }
 }
 
-int setpriority(int i) {
-   struct proc *p = myproc();
-
-   if (p->priority < 0 || p->priority > 31) return -1;
-   else p->priority = p->baseline_priority;
-	
-   return 0;      
-
+int setpriority(int priority){
+  struct proc *p = myproc();
+  p->priority = priority;
+  return 0;
 }
-
 
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
@@ -356,43 +381,44 @@ scheduler(void)
     sti();
 
     // Loop over process table looking for process to run.
+    int highest_priority = 999999; // Modification
+
     acquire(&ptable.lock);
-    struct proc *highest_priority;
-    highest_priority = ptable.proc;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){      
 
-      if(p->state != RUNNABLE)
-        continue;
-
-      // Modification (Q1)
-      if(p->priority < highest_priority->priority) highest_priority = p;
-
+      if(p->state != RUNNABLE && p->priority < highest_priority)
+        highest_priority = p->priority;
     }
-    p = highest_priority;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      p->priority = p->baseline_priority;      
- 
-      switchuvm(p);
-      p->run_t = clock(); //  Modification (Q3)
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE) continue;
 
-      p->state = RUNNING;
-      p->priority += -1; // Modification (Q1)
+      if(highest_priority == p->priority){
 
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
+        // Switch to chosen process.  It is the process's job
+        // to release ptable.lock and then reacquire it
+        // before jumping back to us.
+        c->proc = p;      
+        switchuvm(p);
+        p->state = RUNNING;
+        p->burst_t += 1; // Modification (Q3)
+
+        if(p->priority < 31 && p->priority >= 0)
+        p->priority += 1;
+
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+      }
+
+      else {
+        if(p->priority > 0) p->priority += -1;
+      }
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-     
-      p->end_t = clock(); // Modification (Q3)
-      p->turnaround_time += p->end_t - p->start_t;
-      p->wait_time += p->run_t - p->start_t;
-
+   
+    }
     
     release(&ptable.lock);
 
